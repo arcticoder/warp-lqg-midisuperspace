@@ -62,11 +62,12 @@ class LQGParameters:
     l_planck_sq: float = PLANCK_LENGTH_SQ
     mu_bar_scheme: MuBarScheme = MuBarScheme.MINIMAL_AREA
     lattice_refinement_levels: int = 3
-    basis_truncation: int = 100  # Reduced from 5000 for testing
+    basis_truncation: int = 5000
     regularization_epsilon: float = 1e-12
-      # Quantum numbers ranges
-    mu_max: int = 3  # Reduced from 10 for memory efficiency  
-    nu_max: int = 3  # Reduced from 10 for memory efficiency
+    
+    # Quantum numbers ranges
+    mu_max: int = 10
+    nu_max: int = 10
     
     # Coherent state parameters
     coherent_state_width: float = 1.0
@@ -457,7 +458,8 @@ class MidisuperspaceHamiltonianConstraint:
                     row_indices.append(i)
                     col_indices.append(j)
                     matrix_data.append(matrix_element)
-      def _matter_coupling_matrix_element(self, state_i: FluxBasisState, state_j: FluxBasisState,
+    
+    def _matter_coupling_matrix_element(self, state_i: FluxBasisState, state_j: FluxBasisState,
                                       site: int, exotic_field: float) -> complex:
         """Compute matter coupling matrix element."""
         
@@ -487,43 +489,20 @@ class MidisuperspaceHamiltonianConstraint:
     def _solve_constraint_cpu(self, num_eigs: int) -> Tuple[np.ndarray, np.ndarray]:
         """Solve constraint using CPU-based sparse eigenvalue solver."""
         
-        # For small matrices, use dense solver to avoid singularity issues
-        if self.H_matrix.shape[0] <= 200:
-            print("Using dense eigenvalue solver for small matrix...")
-            H_dense = self.H_matrix.toarray()
-            eigenvals, eigenvecs = np.linalg.eigh(H_dense)
-            # Sort by absolute value to find states closest to zero
-            idx = np.argsort(np.abs(eigenvals))
-            eigenvals = eigenvals[idx[:num_eigs]]
-            eigenvecs = eigenvecs[:, idx[:num_eigs]]
-            print(f"Constraint eigenvalues: {eigenvals}")
-            return eigenvals, eigenvecs
-        
-        # For larger matrices, try sparse solver
+        # Find smallest eigenvalues (closest to zero)
         try:
             eigenvals, eigenvecs = spla.eigsh(
                 self.H_matrix, 
                 k=min(num_eigs, self.kin_space.dim - 1),
-                which='SM',  # Smallest magnitude
+                sigma=0,  # Find eigenvalues closest to zero
+                which='LM',
                 maxiter=1000,
                 tol=1e-10
             )
-        except Exception as e:
-            print(f"⚠ Standard sparse solver failed: {e}")
-            try:
-                # Try different approach
-                eigenvals, eigenvecs = spla.eigs(
-                    self.H_matrix, 
-                    k=min(num_eigs, self.kin_space.dim - 1),
-                    which='SM'
-                )
-                eigenvals = np.real(eigenvals)
-                eigenvecs = np.real(eigenvecs)
-            except Exception as e2:
-                print(f"❌ All eigenvalue solvers failed: {e2}")
-                # Return dummy results
-                eigenvals = np.zeros(num_eigs)
-                eigenvecs = np.eye(self.H_matrix.shape[0], num_eigs)
+        except spla.ArpackNoConvergence as e:
+            print(f"⚠ ARPACK convergence warning: using partial results")
+            eigenvals = e.eigenvalues
+            eigenvecs = e.eigenvectors
         
         # Sort by absolute value (closest to zero first)
         sorted_indices = np.argsort(np.abs(eigenvals))
@@ -577,16 +556,17 @@ class MidisuperspaceHamiltonianConstraint:
         
         if self.H_matrix is None:
             return {"error": "Hamiltonian not constructed"}
-          # Check Hermiticity
+        
+        # Check Hermiticity
         H_dag = self.H_matrix.getH()
-        diff_matrix = self.H_matrix - H_dag
-        hermiticity_error = np.max(np.abs(diff_matrix.data)) if diff_matrix.nnz > 0 else 0.0
-          # Check constraint closure (simplified)
+        hermiticity_error = np.max(np.abs((self.H_matrix - H_dag).data))
+        
+        # Check constraint closure (simplified)
         # Full check would require multiple constraint operators
         
         results = {
-            "hermiticity_error": float(hermiticity_error),
-            "matrix_norm": float(spla.norm(self.H_matrix)),
+            "hermiticity_error": hermiticity_error,
+            "matrix_norm": spla.norm(self.H_matrix),
             "constraint_violations": 0.0  # Placeholder
         }
         
@@ -603,7 +583,7 @@ class LQGMidisuperspaceFramework:
         self.kinematical_space = None
         self.hamiltonian_constraint = None
         self.physical_states = []
-    
+        
     def load_classical_data(self, json_file: str) -> Tuple[np.ndarray, ...]:
         """Load classical midisuperspace data from JSON file."""
         
@@ -612,59 +592,12 @@ class LQGMidisuperspaceFramework:
         with open(json_file, 'r') as f:
             data = json.load(f)
         
-        # Extract spatial grid (support multiple formats)
-        if "r_grid" in data:
-            r_grid = np.array(data["r_grid"])
-        elif "lattice_r" in data:
-            r_grid = np.array(data["lattice_r"])
-        elif "r" in data:
-            r_grid = np.array(data["r"])
-        else:
-            raise KeyError("No spatial grid found. Expected 'r_grid', 'lattice_r', or 'r' in data")
-        
-        # Extract triads E^x and E^φ (support multiple formats)
-        if "E_classical" in data:
-            if "E_x" in data["E_classical"]:
-                E_x = np.array(data["E_classical"]["E_x"])
-                E_phi = np.array(data["E_classical"]["E_phi"])
-            elif "E^x" in data["E_classical"]:
-                E_x = np.array(data["E_classical"]["E^x"])
-                E_phi = np.array(data["E_classical"]["E^phi"])
-            else:
-                raise KeyError("Expected E_x/E_phi or E^x/E^phi in E_classical")
-        else:
-            # Fallback to direct fields
-            E_x = np.array(data["E11"])
-            E_phi = np.array(data["E22"])
-        
-        # Extract extrinsic curvature K_x and K_φ
-        if "K_classical" in data:
-            if "K_x" in data["K_classical"]:
-                K_x = np.array(data["K_classical"]["K_x"])
-                K_phi = np.array(data["K_classical"]["K_phi"])
-            elif "K^x" in data["K_classical"]:
-                K_x = np.array(data["K_classical"]["K^x"])
-                K_phi = np.array(data["K_classical"]["K^phi"])
-            else:
-                raise KeyError("Expected K_x/K_phi or K^x/K^phi in K_classical")
-        else:
-            # Estimate from metric components if available
-            if "h11" in data and "h22" in data:
-                K_x = np.array(data["h11"]) / 2.0  # Approximate
-                K_phi = np.array(data["h22"]) / 2.0
-            else:
-                # Default to small values
-                K_x = np.zeros_like(r_grid)
-                K_phi = np.zeros_like(r_grid)
-        
-        # Extract matter field (exotic matter density)
-        if "exotic_profile" in data and "scalar_field" in data["exotic_profile"]:
-            exotic_matter = np.array(data["exotic_profile"]["scalar_field"])
-        elif "exotic_matter" in data:
-            exotic_matter = np.array(data["exotic_matter"])
-        else:
-            # Default to constant exotic matter density
-            exotic_matter = np.ones_like(r_grid) * 1e-15
+        r_grid = np.array(data["r_grid"])
+        E_x = np.array(data["E_classical"]["E_x"])
+        E_phi = np.array(data["E_classical"]["E_phi"])
+        K_x = np.array(data["K_classical"]["K_x"])
+        K_phi = np.array(data["K_classical"]["K_phi"])
+        exotic_matter = np.array(data["exotic_profile"]["scalar_field"])
         
         # Create lattice configuration
         dr = r_grid[1] - r_grid[0] if len(r_grid) > 1 else 1.0
