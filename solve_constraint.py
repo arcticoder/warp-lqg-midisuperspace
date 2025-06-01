@@ -17,7 +17,19 @@ import scipy.sparse.linalg as spla
 import argparse
 import json
 import os
+import time
 from typing import Dict, Tuple, List, Optional
+
+# GPU acceleration imports with fallback
+try:
+    import cupy as cp
+    import cupyx.scipy.sparse as cusp
+    import cupyx.scipy.sparse.linalg as cusla
+    GPU_AVAILABLE = True
+    print("🚀 GPU acceleration available (CuPy)")
+except ImportError:
+    GPU_AVAILABLE = False
+    print("⚠️  CuPy not available, GPU flag will be ignored")
 
 from kinematical_hilbert import MidisuperspaceHilbert, load_lattice_from_reduced_variables
 from hamiltonian_constraint import HamiltonianConstraint
@@ -31,21 +43,33 @@ class ConstraintSolver:
     1. Exact diagonalization for small Hilbert spaces
     2. Iterative eigensolvers for larger spaces  
     3. Semiclassical coherent state analysis
-    """
-    
+    4. GPU acceleration with CuPy (optional)    
     def __init__(self, hilbert: MidisuperspaceHilbert, 
-                 constraint: HamiltonianConstraint):
+                 constraint: HamiltonianConstraint,
+                 use_gpu: bool = False):
         self.hilbert = hilbert
         self.constraint = constraint
         self.physical_states = []
         self.eigenvalues = []
+        self.use_gpu = use_gpu and GPU_AVAILABLE
         
+        if self.use_gpu:
+            print(f"🔬 GPU solver initialized (CuPy)")
+            try:
+                # Check GPU memory
+                mempool = cp.get_default_memory_pool()
+                print(f"   GPU memory: {mempool.free_bytes() / 1e9:.1f} GB free")
+                print(f"   GPU device: {cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id)['name'].decode()}")
+            except Exception as e:
+                print(f"   GPU info unavailable: {e}")        else:
+            print("🖥️  CPU solver initialized")
+    
     def solve_master_constraint(self, n_states: int = 5, 
                               tolerance: float = 1e-10) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Solve master constraint M̂|Ψₙ⟩ = λₙ|Ψₙ⟩
+        Solve master constraint eigenvalue problem.
         
-        Physical states correspond to λₙ ≈ 0
+        Physical states correspond to near-zero eigenvalues.
         
         Args:
             n_states: Number of lowest eigenvalues to compute
@@ -55,15 +79,111 @@ class ConstraintSolver:
             (eigenvalues, eigenvectors) with shape (n_states,) and (dim, n_states)
         """
         print("Computing master constraint operator...")
+        start_time = time.time()
         M = self.constraint.master_constraint_operator()
+        build_time = time.time() - start_time
         
         print(f"Master constraint matrix: {M.shape}")
         print(f"Non-zero elements: {M.nnz}")
         print(f"Sparsity: {M.nnz / (M.shape[0]**2):.6f}")
+        print(f"Build time: {build_time:.2f}s")
+        
+        if self.use_gpu and GPU_AVAILABLE:
+            return self._solve_gpu(M, n_states, tolerance)
+        else:
+            return self._solve_cpu(M, n_states, tolerance)
+    
+    def _solve_gpu(self, M_cpu: sp.spmatrix, n_states: int, tolerance: float) -> Tuple[np.ndarray, np.ndarray]:
+        """GPU-accelerated eigenvalue solving using CuPy"""
+        print("🚀 Using GPU acceleration (CuPy)...")
+        
+        try:
+            # Transfer matrix to GPU
+            print("   Transferring matrix to GPU...")
+            transfer_start = time.time()
+            
+            M_csr = M_cpu.tocsr()
+            M_gpu = cusp.csr_matrix(
+                (cp.asarray(M_csr.data),
+                 cp.asarray(M_csr.indices), 
+                 cp.asarray(M_csr.indptr)),
+                shape=M_csr.shape
+            )
+            
+            transfer_time = time.time() - transfer_start
+            print(f"   Transfer time: {transfer_time:.2f}s")
+            
+            # Check GPU memory usage
+            mempool = cp.get_default_memory_pool()
+            print(f"   GPU memory used: {mempool.used_bytes() / 1e9:.2f} GB")
+            
+            # Choose solver based on matrix size
+            solve_start = time.time()
+            
+            if M_gpu.shape[0] <= 500:
+                # Dense eigendecomposition for small matrices
+                print("   Using dense GPU eigendecomposition...")
+                M_dense = M_gpu.toarray()
+                eigenvals, eigenvecs = cp.linalg.eigh(M_dense)
+                
+                # Sort by eigenvalue magnitude
+                idx = cp.argsort(eigenvals)
+                eigenvals = eigenvals[idx][:n_states]
+                eigenvecs = eigenvecs[:, idx][:, :n_states]
+                
+            else:
+                # Sparse iterative eigendecomposition
+                print("   Using sparse GPU eigendecomposition...")
+                try:
+                    eigenvals, eigenvecs = cusla.eigsh(
+                        M_gpu, k=n_states, which='SM',  # Smallest magnitude
+                        tol=tolerance, maxiter=1000
+                    )
+                    
+                    # Sort by eigenvalue
+                    idx = cp.argsort(eigenvals)
+                    eigenvals = eigenvals[idx]
+                    eigenvecs = eigenvecs[:, idx]
+                    
+                except Exception as e:
+                    print(f"   Sparse GPU solver failed: {e}")
+                    print("   Falling back to dense GPU solver...")
+                    M_dense = M_gpu.toarray()
+                    eigenvals, eigenvecs = cp.linalg.eigh(M_dense)
+                    idx = cp.argsort(eigenvals)
+                    eigenvals = eigenvals[idx][:n_states]
+                    eigenvecs = eigenvecs[:, idx][:, :n_states]
+            
+            solve_time = time.time() - solve_start
+            print(f"   Solve time: {solve_time:.2f}s")
+            
+            # Transfer results back to CPU
+            print("   Transferring results to CPU...")
+            eigenvals_cpu = cp.asnumpy(eigenvals)
+            eigenvecs_cpu = cp.asnumpy(eigenvecs)
+            
+            # Store results
+            self.eigenvalues = eigenvals_cpu
+            self.physical_states = eigenvecs_cpu
+            
+            total_time = time.time() - solve_start + transfer_time
+            print(f"   🎯 Total GPU time: {total_time:.2f}s")
+            
+            return eigenvals_cpu, eigenvecs_cpu
+            
+        except Exception as e:
+            print(f"   ❌ GPU solving failed: {e}")
+            print("   Falling back to CPU...")
+            return self._solve_cpu(M_cpu, n_states, tolerance)
+    
+    def _solve_cpu(self, M: sp.spmatrix, n_states: int, tolerance: float) -> Tuple[np.ndarray, np.ndarray]:
+        """CPU eigenvalue solving (original implementation)"""
+        print("🖥️  Using CPU solver...")
+        solve_start = time.time()
         
         if M.shape[0] <= 100:
             # Small matrices: use dense eigendecomposition
-            print("Using dense eigendecomposition...")
+            print("   Using dense eigendecomposition...")
             M_dense = M.toarray()
             eigenvals, eigenvecs = np.linalg.eigh(M_dense)
             
@@ -74,7 +194,7 @@ class ConstraintSolver:
             
         else:
             # Large matrices: use sparse iterative solver
-            print("Using sparse eigendecomposition...")
+            print("   Using sparse eigendecomposition...")
             
             try:
                 eigenvals, eigenvecs = spla.eigsh(
@@ -88,7 +208,7 @@ class ConstraintSolver:
                 eigenvecs = eigenvecs[:, idx]
                 
             except spla.ArpackNoConvergence as e:
-                print(f"ARPACK convergence warning: {e}")
+                print(f"   ARPACK convergence warning: {e}")
                 eigenvals = e.eigenvalues
                 eigenvecs = e.eigenvectors
                 
@@ -96,6 +216,9 @@ class ConstraintSolver:
                     idx = np.argsort(eigenvals)
                     eigenvals = eigenvals[idx]
                     eigenvecs = eigenvecs[:, idx]
+        
+        solve_time = time.time() - solve_start
+        print(f"   CPU solve time: {solve_time:.2f}s")
         
         self.eigenvalues = eigenvals
         self.physical_states = eigenvecs
@@ -258,6 +381,13 @@ def main():
                        help="Output directory")
     parser.add_argument("--n-states", type=int, default=5,
                        help="Number of eigenvalues to compute")
+    parser.add_argument("--gpu", action="store_true",
+                       help="Use GPU acceleration (requires CuPy or PyTorch)")
+    parser.add_argument("--backend", type=str, default="auto",
+                       choices=["auto", "cupy", "torch", "cpu"],
+                       help="GPU backend to use")
+    parser.add_argument("--benchmark", action="store_true",
+                       help="Run benchmark comparing all available backends")
     parser.add_argument("--mu-scheme", type=str, default="constant",
                        choices=["constant", "improved"],
                        help="mu-bar-scheme for holonomy regularization")
