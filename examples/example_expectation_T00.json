@@ -1,0 +1,61 @@
+{
+  "metadata": {
+    "description": "Example quantum expectation values from LQG physical state",
+    "n_lattice_points": 5,
+    "units": "Planck_units",
+    "source": "loop_quantum_gravity_midisuperspace"
+  },
+  "lattice_r": [
+    1e-15,
+    2.154e-15,
+    4.642e-15,
+    1e-14,
+    2.154e-14
+  ],
+  "flux_expectations": {
+    "E_x": [
+      4.512e-29,
+      1.650e-28,
+      7.823e-28,
+      3.565e-27,
+      1.650e-26
+    ],
+    "E_phi": [
+      1.256e-14,
+      2.706e-14,
+      5.828e-14,
+      1.256e-13,
+      2.706e-13
+    ]
+  },
+  "stress_energy_tensor": {
+    "T00": [
+      -2.8471e15,
+      -1.9823e15,
+      -9.231e14,
+      -3.352e14,
+      -7.261e13
+    ],
+    "Trr": [
+      1.4235e15,
+      9.911e14,
+      4.615e14,
+      1.676e14,
+      3.630e13
+    ],
+    "Ttheta": [
+      -1.4235e15,
+      -9.911e14,
+      -4.615e14,
+      -1.676e14,
+      -3.630e13
+    ]
+  },
+  "volume": [
+    5.679e-44,
+    4.467e-42,
+    4.557e-41,
+    4.474e-40,
+    4.467e-39
+  ]
+}

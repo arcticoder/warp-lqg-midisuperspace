@@ -1,0 +1,53 @@
+{
+  "lattice_data": {
+    "r": [
+      1.6165467790396734e-50,
+      3.4820417620514557e-50,
+      7.504010148302163e-50,
+      1.616546779039673e-49,
+      3.482041762051456e-49
+    ],
+    "r_units": "m",
+    "n_points": 5
+  },
+  "quantum_metric_functions": {
+    "lapse_alpha": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "radial_beta": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "description": "Quantum-corrected metric from LQG expectation values"
+  },
+  "quantum_fluxes": {
+    "E_x": [
+      0.10537003459951458,
+      0.08588650337241167,
+      0.09922784993862205,
+      0.08302505463820706,
+      0.23749999999999996
+    ],
+    "E_phi": [
+      0.13703452959922213,
+      0.07254280604010269,
+      0.07056198115087828,
+      0.06968210363889643,
+      0.23749999999999996
+    ],
+    "description": "Quantum flux expectation values \u27e8E^a\u27e9"
+  },
+  "metadata": {
+    "source": "loop_quantum_gravity_midisuperspace",
+    "quantum_corrections": true,
+    "classical_limit": "large_quantum_numbers",
+    "discretization": "lattice_regularization"
+  }
+}

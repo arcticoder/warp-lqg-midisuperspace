@@ -1,0 +1,59 @@
+{
+  "quantum_spectrum": {
+    "eigenvalues_omega_squared": [
+      0.8162112931619194,
+      1.0,
+      3.2324737367658723e+27
+    ],
+    "frequencies": [
+      0.9034441284118899,
+      1.0,
+      56854847961856.98
+    ],
+    "lattice_r": [
+      1e-15,
+      2.154e-15,
+      4.642e-15,
+      1e-14,
+      2.154e-14
+    ],
+    "n_modes": 3
+  },
+  "stability_analysis": {
+    "total_modes": 3,
+    "stable_modes": 3,
+    "unstable_modes": 0,
+    "marginal_modes": 0,
+    "most_unstable_eigenvalue": 0.8162112931619194,
+    "growth_rate": 0.0,
+    "stability_verdict": "STABLE"
+  },
+  "quantum_metric": {
+    "alpha_lapse": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "beta_radial": [
+      8.397180334393875,
+      14.320990031470945,
+      15.825263745210039,
+      14.658457220432538,
+      7.273997124396107
+    ],
+    "r_effective": [
+      0.010904861379994423,
+      0.005772773083519473,
+      0.005615144047259712,
+      0.0055451256195860575,
+      0.01889964949216257
+    ]
+  },
+  "metadata": {
+    "description": "Quantum fluctuation spectrum from LQG warp bubble",
+    "method": "discrete_sturm_liouville",
+    "units": "Planck_units"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "solver_info": {
+    "hilbert_dimension": 1024,
+    "n_eigenvalues": 3,
+    "n_physical_states": 0,
+    "lowest_eigenvalue": 3744033956212918.0
+  },
+  "files": {
+    "eigenvalues": "eigenvalues.npy",
+    "physical_states": "physical_states.npy",
+    "validation": "validation.json"
+  }
+}

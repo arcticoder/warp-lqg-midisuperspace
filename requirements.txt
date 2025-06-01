@@ -1,0 +1,7 @@
+numpy>=1.21.0
+scipy>=1.7.0
+sympy>=1.9.0
+python-ndjson>=0.3.1
+matplotlib>=3.5.0
+pytest>=6.2.0
+pytest-cov>=2.12.0

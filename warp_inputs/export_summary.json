@@ -1,0 +1,22 @@
+{
+  "export_info": {
+    "source_directory": "quantum_outputs",
+    "output_directory": "warp_inputs",
+    "units": "si",
+    "format": "json",
+    "framework_path": null
+  },
+  "exported_files": {
+    "T00_json": "warp_inputs\\T00_quantum.json",
+    "quantum_metric": "warp_inputs\\quantum_metric.json"
+  },
+  "lqg_data_summary": {
+    "available_datasets": [
+      "expectation_values",
+      "T00_data",
+      "quantum_spectrum",
+      "solver_summary"
+    ],
+    "total_files_created": 2
+  }
+}
