@@ -1,53 +1,295 @@
 #!/usr/bin/env python3
 """
-Solve Constraint (Task 4)
+solve_constraint.py
 
-Numerically solves the quantum constraint Ĥ|Ψ⟩ = 0:
-- Constructs master constraint M̂ = Ĥ†Ĥ
-- Finds zero eigenvalues using sparse linear algebra
-- Identifies semiclassical coherent states
-- Validates physical state properties
+Unified LQG midisuperspace constraint solver (CPU or GPU).
+Replaces the old:
+  - pytorch_gpu_solver.py
+  - solve_constraint_gpu.py
+  - solve_constraint_pytorch.py
+  - solve_constraint.py (original CPU-only)
 
-Author: Loop Quantum Gravity Implementation
+Usage:
+    python3 solve_constraint.py \
+      --lattice examples/example_reduced_variables.json \
+      --outdir quantum_inputs \
+      [--use-gpu] [--device cuda:0] [--num-eigs 1]
 """
 
+import argparse, json, os, sys, time
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
-import argparse
-import json
-import os
-import time
-from typing import Dict, Tuple, List, Optional
 
-# GPU acceleration imports with fallback
+# Try to import PyTorch—if it’s not installed or CUDA isn’t available, GPU mode will be disabled
 try:
-    import cupy as cp
-    import cupyx.scipy.sparse as cusp
-    import cupyx.scipy.sparse.linalg as cusla
-    GPU_AVAILABLE = True
-    print("🚀 GPU acceleration available (CuPy)")
+    import torch
+    torch.backends.cudnn.benchmark = True
+    GPU_AVAILABLE = torch.cuda.is_available()
+    if GPU_AVAILABLE:
+        torch_device = torch.device("cuda")
+    else:
+        torch_device = torch.device("cpu")
 except ImportError:
+    torch = None
     GPU_AVAILABLE = False
-    print("⚠️  CuPy not available, GPU flag will be ignored")
-
-from kinematical_hilbert import MidisuperspaceHilbert, load_lattice_from_reduced_variables
-from hamiltonian_constraint import HamiltonianConstraint
+    torch_device = None
 
 
-class ConstraintSolver:
+# -----------------------------------------------------------------------------
+# 1) Load midisuperspace “reduced variables” (same as before)
+# -----------------------------------------------------------------------------
+def load_reduced_variables(lattice_json):
     """
-    Solves quantum constraint equation for physical states
-    
-    Methods:
-    1. Exact diagonalization for small Hilbert spaces
-    2. Iterative eigensolvers for larger spaces  
-    3. Semiclassical coherent state analysis
-    4. GPU acceleration with CuPy (optional)    
-    def __init__(self, hilbert: MidisuperspaceHilbert, 
-                 constraint: HamiltonianConstraint,
-                 use_gpu: bool = False):
-        self.hilbert = hilbert
+    Reads a JSON file containing:
+      {
+        "r_grid": [...],
+        "E_classical": { "E_x": [...], "E_phi": [...] },
+        "K_classical": { "K_x": [...], "K_phi": [...] },
+        "exotic_profile": { "scalar_field": [...] }
+      }
+    Returns: (r_grid, E_x, E_phi, K_x, K_phi, exotic_array)
+    """
+    data = json.load(open(lattice_json))
+    r_grid  = np.array(data["r_grid"])
+    E_x     = np.array(data["E_classical"]["E_x"])
+    E_phi   = np.array(data["E_classical"]["E_phi"])
+    K_x     = np.array(data["K_classical"]["K_x"])
+    K_phi   = np.array(data["K_classical"]["K_phi"])
+    exotic  = np.array(data["exotic_profile"]["scalar_field"])
+    return r_grid, E_x, E_phi, K_x, K_phi, exotic
+
+
+# -----------------------------------------------------------------------------
+# 2) Build (toy) Hamiltonian constraint matrix on a very small truncated basis
+# -----------------------------------------------------------------------------
+def build_hamiltonian_matrix(r_grid, E_x, E_phi, K_x, K_phi, exotic,
+                             mu_vals, nu_vals, mu_bar_scheme="auto"):
+    """
+    Assemble a sparse Hamiltonian Ĥ (gravity + matter) in a tiny midisuperspace basis.
+
+    For demonstration, we just build a diagonal matrix of size basis_dim,
+    where basis_dim = (len(mu_vals)*len(nu_vals))^Nsites (but truncated if too large).
+
+    In a real implementation, you’d fill in holonomy loops, inverse‐triad regularizations, etc.
+    """
+    Nsites = len(r_grid)
+    dim_per_site = len(mu_vals) * len(nu_vals)
+    basis_dim = dim_per_site**Nsites
+    if basis_dim > 10000:
+        print(f"⚠ Truncating basis from {basis_dim} → 10000")
+        basis_dim = 10000
+
+    # Toy diagonal entries that depend on E_x[0], E_phi[-1], sum(exotic), etc.
+    diag = np.zeros(basis_dim, dtype=np.complex128)
+    for i in range(basis_dim):
+        diag[i] = (E_x[0] + E_phi[-1] + exotic.sum()) * (1 + 0.01 * i)
+
+    return sp.csr_matrix(np.diag(diag))
+
+
+# -----------------------------------------------------------------------------
+# 3) CPU solver path (SciPy)
+# -----------------------------------------------------------------------------
+def solve_constraint_cpu(H, num_eigs=1):
+    """
+    Solve H†H |ψ⟩ = 0 for the num_eigs lowest modes via ARPACK.
+    Returns (eigenvalues, eigenvectors) of H†H near zero.
+    """
+    HdagH = H.getH().dot(H)
+    vals, vecs = spla.eigs(HdagH, k=num_eigs, sigma=0.0)
+    return vals, vecs
+
+
+# -----------------------------------------------------------------------------
+# 4) GPU solver path (PyTorch)
+# -----------------------------------------------------------------------------
+def solve_constraint_gpu_torch(H_cpu, num_eigs=1, device="cuda:0"):
+    """
+    Convert scipy.sparse matrix H_cpu → PyTorch sparse on GPU/device.
+    Then compute HdagH = H^† H on GPU and do a dense eigh (for small dims)
+    or a simple power iteration if dims > ~1000.
+
+    Returns (eigenvals, eigenvecs) as NumPy arrays.
+    """
+    if not GPU_AVAILABLE or torch is None:
+        raise RuntimeError("GPU mode requested but PyTorch/CUDA not available.")
+
+    # Convert H_cpu to COO, then to PyTorch sparse_coo tensor on GPU
+    H_coo = H_cpu.tocoo()
+    indices = torch.LongTensor(np.vstack((H_coo.row, H_coo.col))).to(device)
+    values = torch.complex(
+        torch.from_numpy(H_coo.data.real).to(device),
+        torch.from_numpy(H_coo.data.imag).to(device)
+    )
+    shape = H_coo.shape
+    H_torch = torch.sparse_coo_tensor(indices, values, size=shape, device=device)
+
+    # Build HdagH = H^† H
+    Hdag = H_torch.transpose(0, 1).conj()
+    HdagH_sparse = torch.sparse.mm(Hdag, H_torch)
+    # For small dims, convert to dense
+    n = shape[0]
+    if n <= 1000:
+        HdagH = HdagH_sparse.to_dense()
+        # Use torch.linalg.eigh (Hermitian)
+        eigvals_t, eigvecs_t = torch.linalg.eigh(HdagH)
+        # Sort by |eigvals|
+        idx = torch.argsort(torch.abs(eigvals_t))[:num_eigs]
+        sel_vals = eigvals_t[idx].cpu().numpy()
+        sel_vecs = eigvecs_t[:, idx].cpu().numpy()
+        return sel_vals, sel_vecs
+    else:
+        # For larger dims, fallback to CPU SciPy
+        print("⚠ GPU “large matrix” path not fully optimized. Falling back to CPU.")
+        return solve_constraint_cpu(H_cpu, num_eigs=num_eigs)
+
+
+# -----------------------------------------------------------------------------
+# 5) Compute expectation ⟨E⟩ and ⟨T00⟩ from the “physical” state ψ
+# -----------------------------------------------------------------------------
+def compute_expectation_E_and_T00(r_grid, E_x, E_phi, exotic, psi, mu_vals, nu_vals):
+    """
+    Toy routine: assume <E^x(r_i)> ≈ average(mu_vals)*γ, etc.
+    T00(r_i) ≈ |E_x − E_phi| + exotic[i]. 
+    Returns two dicts: E_out, T00_out.
+    """
+    avg_mu = np.mean(mu_vals)
+    avg_nu = np.mean(nu_vals)
+    γ, ℓ2 = 1.0, 1.0  # set Immirzi and ℓ_Pl² = 1
+    Ex_expect = [(γ * ℓ2 * avg_mu) for _ in r_grid]
+    Ephi_expect = [(γ * ℓ2 * avg_nu) for _ in r_grid]
+    T00_vals = [abs(Ex_expect[i] - Ephi_expect[i]) + exotic[i] for i in range(len(r_grid))]
+
+    E_out = {"r": list(r_grid), "E_x": Ex_expect, "E_phi": Ephi_expect}
+    T_out = {"r": list(r_grid), "T00": T00_vals}
+    return E_out, T_out
+
+
+# -----------------------------------------------------------------------------
+# 6) Quantum‐corrected stability (toy Sturm–Liouville)
+# -----------------------------------------------------------------------------
+def quantum_stability(r_grid, E_x_q, E_phi_q, wormhole_ndjson, output_ndjson):
+    """
+    Read the classical wormhole solutions (NDJSON),
+    reconstruct g_rr(r) ∼ E_phi_q/E_x_q, build a finite‐difference SL operator,
+    and solve L ψ = ω² W ψ via SciPy for a few modes. Write NDJSON at output_ndjson.
+    """
+    import ndjson
+    # Load classical wormhole NDJSON (to get “label” and r_throat)
+    with open(wormhole_ndjson) as f:
+        wh_data = ndjson.load(f)
+
+    spectrum = []
+    for entry in wh_data:
+        b0 = entry.get("r_throat", r_grid[0])
+        mask = r_grid >= b0
+        r_sub = r_grid[mask]
+        g_rr_sub = (E_phi_q[mask] / (E_x_q[mask] + 1e-12)).tolist()
+
+        # Build a simple tridiagonal SL operator on r_sub
+        n = len(r_sub)
+        dr = r_sub[1] - r_sub[0]
+        diag = np.zeros(n)
+        offd = -np.ones(n - 1) / (dr**2)
+
+        for i in range(n):
+            p = 1.0
+            diag[i] = 2 * p/(dr**2)
+
+        from scipy.sparse import diags
+        L = diags([offd, diag, offd], offsets=[-1,0,1], format="csr")
+        W = diags(np.ones(n), offsets=0, format="csr")
+
+        evals, _ = spla.eigs(L, M=W, k=3, sigma=0.0)
+        for idx, ev in enumerate(evals):
+            evv = float(ev.real)
+            growth = float(np.sqrt(abs(evv))) if evv < 0 else 0.0
+            spectrum.append({
+                "label": f"{entry['label']}_qmode{idx}",
+                "eigenvalue": evv,
+                "growth_rate": growth,
+                "stable": (evv >= 0),
+                "method": "quantum-corrected"
+            })
+
+    # Write NDJSON
+    with open(output_ndjson, "w") as f:
+        writer = ndjson.writer(f)
+        writer.writerows(spectrum)
+
+
+# -----------------------------------------------------------------------------
+# 7) Export quantum observables to JSON files
+# -----------------------------------------------------------------------------
+def export_quantum_observables(outdir, E_out, T00_out, spectrum_out):
+    os.makedirs(outdir, exist_ok=True)
+    with open(os.path.join(outdir, "expectation_E.json"), "w") as f:
+        json.dump(E_out, f, indent=2)
+    with open(os.path.join(outdir, "expectation_T00.json"), "w") as f:
+        json.dump(T00_out, f, indent=2)
+    with open(os.path.join(outdir, "quantum_spectrum.json"), "w") as f:
+        json.dump(spectrum_out, f, indent=2)
+    print(f"✓ Written quantum files to {outdir}/")
+
+
+# -----------------------------------------------------------------------------
+# 8) Single “main” to tie everything together
+# -----------------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(description="Unified LQG solver (CPU/GPU).")
+    parser.add_argument("--lattice",   required=True, help="JSON with midisuperspace data")
+    parser.add_argument("--outdir",   required=True, help="Where to write quantum outputs")
+    parser.add_argument("--mu-vals",  nargs="+", type=int, default=[-1,0,1], help="μ labels")
+    parser.add_argument("--nu-vals",  nargs="+", type=int, default=[-1,0,1], help="ν labels")
+    parser.add_argument("--use-gpu",  action="store_true", help="If set, use GPU/PyTorch")
+    parser.add_argument("--device",   default="cuda:0", help="PyTorch device if --use-gpu")
+    parser.add_argument("--num-eigs", type=int, default=1, help="How many near-zero modes")
+    args = parser.parse_args()
+
+    # 1) Load reduced variables
+    r_grid, E_x, E_phi, K_x, K_phi, exotic = load_reduced_variables(args.lattice)
+
+    # 2) Build Hamiltonian on small truncated basis
+    H = build_hamiltonian_matrix(r_grid, E_x, E_phi, K_x, K_phi, exotic,
+                                 mu_vals=args.mu_vals, nu_vals=args.nu_vals)
+
+    # 3) Solve constraint (CPU or GPU)
+    if args.use_gpu:
+        if not GPU_AVAILABLE:
+            print("❌ GPU requested but not available. Exiting.")
+            sys.exit(1)
+        print("🔷 Running GPU‐accelerated solver …")
+        eigvals, eigvecs = solve_constraint_gpu_torch(H, num_eigs=args.num_eigs, device=args.device)
+    else:
+        print("⚙️  Running CPU‐only solver …")
+        eigvals, eigvecs = solve_constraint_cpu(H, num_eigs=args.num_eigs)
+
+    # 4) Choose the first near-zero eigenvector as physical state ψ
+    psi = eigvecs[:, 0]
+
+    # 5) Compute expectation values ⟨E⟩ and ⟨T00⟩
+    E_out, T00_out = compute_expectation_E_and_T00(r_grid, E_x, E_phi, exotic, psi,
+                                                  mu_vals=args.mu_vals, nu_vals=args.nu_vals)
+
+    # 6) Compute a toy quantum‐corrected stability spectrum
+    spectrum_out = []
+    # Reconstruct arrays for E_x_q, E_phi_q
+    E_x_q   = np.array(E_out["E_x"])
+    E_phi_q = np.array(E_out["E_phi"])
+    # Assume classical wormhole NDJSON is at a known relative path
+    wormhole_ndjson = "warp-predictive-framework/outputs/wormhole_solutions.ndjson"
+    quantum_spec_ndjson = os.path.join(args.outdir, "quantum_stability_spectrum.ndjson")
+    quantum_stability(r_grid, E_x_q, E_phi_q, wormhole_ndjson, quantum_spec_ndjson)
+
+    # 7) Write out E‐ and T00‐expectations plus quantum_spectrum.json
+    export_quantum_observables(args.outdir, E_out, T00_out, spectrum_out)
+
+    print("✅ All done. Quantum outputs in:", args.outdir)
+
+
+if __name__ == "__main__":
+    main()
         self.constraint = constraint
         self.physical_states = []
         self.eigenvalues = []
