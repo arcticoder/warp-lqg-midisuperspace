@@ -20,6 +20,7 @@ import argparse, json, os, sys, time
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+from typing import Dict, Tuple, Optional
 
 # Try to import PyTorch—if it’s not installed or CUDA isn’t available, GPU mode will be disabled
 try:
@@ -303,7 +304,8 @@ if __name__ == "__main__":
                 print(f"   GPU memory: {mempool.free_bytes() / 1e9:.1f} GB free")
                 print(f"   GPU device: {cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id)['name'].decode()}")
             except Exception as e:
-                print(f"   GPU info unavailable: {e}")        else:
+                print(f"   GPU info unavailable: {e}")
+        else:
             print("🖥️  CPU solver initialized")
     
     def solve_master_constraint(self, n_states: int = 5, 
