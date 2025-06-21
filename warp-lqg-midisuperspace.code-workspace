@@ -1,8 +1,19 @@
-{
-  "folders": [
+{  "folders": [
     {
       "path": ".",
       "name": "warp-lqg-midisuperspace"
+    },
+    {
+      "name": "Warp Discretization",
+      "path": "../warp-discretization"
+    },
+    {
+      "name": "Warp Bubble QFT",
+      "path": "../warp-bubble-qft"
+    },
+    {
+      "name": "Warp Core - Main",
+      "path": "../warp-core"
     }
   ],
   "extensions": {
