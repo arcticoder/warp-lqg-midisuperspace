@@ -1,0 +1,25 @@
+{
+  "folders": [
+    {
+      "path": ".",
+      "name": "warp-lqg-midisuperspace"
+    }
+  ],
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-vscode.cpptools",
+      "james-yu.latex-workshop"
+    ]
+  },
+  "settings": {
+    "files.exclude": {
+      "**/.pytest_cache": true,
+      "**/node_modules": true,
+      "**/venv": true,
+      "**/.git": true,
+      "**/__pycache__": true,
+      "**/.venv": true
+    }
+  }
+}
